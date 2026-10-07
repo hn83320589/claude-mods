@@ -22,7 +22,7 @@ type Fake = {
   // 相對於 ROOT 的路徑 → 檔案或資料夾
   files: Record<string, { kind: 'file' | 'dir'; size?: number; mtimeMs?: number; text?: string }>
   // null 代表不是 git repo
-  git: null | { status: string; staged: string; unstaged: string; log: string; stash: string; filters?: string }
+  git: null | { status: string; staged: string; unstaged: string; log: string; stash: string; filters?: string; configFails?: boolean }
 }
 
 const LUCKYDRAW: Fake = {
@@ -78,9 +78,11 @@ const rel = (path: unknown): string => {
 
 // withClock: false 時由測試自己用 mock.clock 控制時間
 let gitCalls: string[][] = []
+let gitCwds: unknown[] = []
 
 const answerEngine = (on: any, fake: Fake, { withClock = true } = {}) => {
   gitCalls = []
+  gitCwds = []
   const children = (dir: string) =>
     Object.entries(fake.files)
       .filter(([p]) => (dir === '' ? !p.includes('/') : p.startsWith(`${dir}/`) && !p.slice(dir.length + 1).includes('/')))
@@ -97,12 +99,16 @@ const answerEngine = (on: any, fake: Fake, { withClock = true } = {}) => {
   on('process.run', (_$: unknown, e: any) => {
     const argv: string[] = [...e.argv]
     gitCalls.push(argv)
+    gitCwds.push(e.init?.cwd)
     // 略過安全設定的 -c key=value，取出真正的子指令
     const args = argv.slice(1)
     while (args[0] === '-c') args.splice(0, 2)
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '' } })
     if (fake.git === null) return { value: { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } }
-    if (args[0] === 'config') return fake.git.filters ? ok(fake.git.filters) : { value: { exitCode: 1, stdout: '', stderr: '' } }
+    if (args[0] === 'config') {
+      if (fake.git.configFails) return { value: { exitCode: 128, stdout: '', stderr: 'fatal: bad config line 3' } }
+      return fake.git.filters ? ok(fake.git.filters) : { value: { exitCode: 1, stdout: '', stderr: '' } }
+    }
     if (args[0] === 'rev-parse') return ok('true')
     if (args[0] === 'status') return ok(fake.git.status)
     if (args[0] === 'diff') return ok(args.includes('--cached') ? fake.git.staged : fake.git.unstaged)
@@ -357,4 +363,22 @@ test('專案根目錄有 git 執行檔（Windows 會優先執行）時，完全�
   const ui = await $.ui.mount({ ...GIT, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /git[.]cmd/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('無法確認 repo 設定（git config 失敗）時不執行 git status', async ($, on) => {
+  answerEngine(on, { ...LUCKYDRAW, git: { ...REPO!, configFails: true } })
+  await $.command.run({ command: 'git-status', args: '' })
+
+  expect(gitCalls.some(argv => argv.includes('status'))).toBe(false)
+  const ui = await $.ui.mount({ ...GIT, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /無法確認/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('git 指令都在專案根目錄執行', async ($, on) => {
+  answerEngine(on, { ...LUCKYDRAW, git: REPO })
+  await $.command.run({ command: 'git-status', args: '' })
+
+  expect(gitCwds.length).toBeGreaterThan(0)
+  for (const cwd of gitCwds) expect(String(cwd).split(String.fromCharCode(92)).join('/')).toBe(ROOT)
 })

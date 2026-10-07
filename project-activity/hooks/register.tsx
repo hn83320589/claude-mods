@@ -19,6 +19,7 @@ const GIT_COLOR = { branch: 'claude', changes: 'warning', commits: 'success' } a
 const LETTER_COLOR: Record<string, string> = { M: 'warning', A: 'success', D: 'error', R: 'suggestion', C: 'suggestion', U: 'error' }
 const COMMIT_COUNT = 30
 const FILTER_SKIPPED = '這個 repository 的設定定義了 filter，為了安全不自動執行 git 指令'
+const CONFIG_UNKNOWN = '無法確認這個 repository 的設定是否安全（git config 失敗），不自動執行 git 指令'
 
 const lastTest = atom({ plugin: 'project-activity', key: 'lastTest' } as const, null)
 const lastTestAt = atom({ plugin: 'project-activity', key: 'lastTestAt' } as const, null)
@@ -85,30 +86,33 @@ const gitArgv = (args: readonly string[]): string[] => ['git', ...SAFE_CONFIG, .
 // filter（clean／smudge／process）可能在 git status 時被執行，名稱由 repo 自訂、無法逐一關閉：
 // repo 自己的設定（local 與 worktree 範圍，含 include 的檔案）定義了 filter 時，就不自動執行 git。
 // 使用者全域或系統設定的 filter（例如 git-lfs）是使用者自己裝的，不受影響。讀取設定本身不會執行任何程式。
-const hasRepoFilters = async ($: EngineInterface): Promise<boolean> => {
+// 回傳不執行 git 的原因；可以安全執行時回傳 null。無法確認時一律不執行（fail closed）：
+// git config 只有在「沒有符合的設定」時回 1，其他非 0（設定檔壞掉、被刻意弄壞）都視為不安全。
+const repoFilterRisk = async ($: EngineInterface, root: string): Promise<string | null> => {
   const result = await $.process.run(
     gitArgv(['config', '--includes', '--show-scope', '--name-only', '--get-regexp', '^filter[.].*[.](clean|smudge|process)$']),
-    { timeoutMs: 10_000 },
+    { cwd: root, timeoutMs: 10_000 },
   )
-  if (result.exitCode !== 0) return false
-  return result.stdout
+  if (result.exitCode === 1) return null
+  if (result.exitCode !== 0) return CONFIG_UNKNOWN
+  const fromRepo = result.stdout
     .split(String.fromCharCode(10))
     .map(line => line.split(String.fromCharCode(9))[0]?.trim())
     .some(scope => scope === 'local' || scope === 'worktree')
+  return fromRepo ? FILTER_SKIPPED : null
 }
 
 // Windows 執行 git 時會先找目前資料夾（專案根目錄）裡的 git.exe、git.cmd 等。
 // 根目錄有這類檔案時，執行的會是 repo 提供的程式，所以完全不執行 git。
 const SHADOWING_GIT = /^git[.](com|exe|bat|cmd|vbs|vbe|js|jse|wsf|wsh|msc|cpl|ps1)$/i
 
-const shadowingGit = async ($: EngineInterface): Promise<string | null> => {
-  const root = slash(await $.session.root())
+const shadowingGit = async ($: EngineInterface, root: string): Promise<string | null> => {
   const entry = (await $.fs.list(root)).find(e => SHADOWING_GIT.test(e.name))
   return entry ? clean(entry.name) : null
 }
 
-const gitRun = async ($: EngineInterface, args: readonly string[]): Promise<string> => {
-  const result = await $.process.run(gitArgv(args), { timeoutMs: 10_000 })
+const gitRun = async ($: EngineInterface, root: string, args: readonly string[]): Promise<string> => {
+  const result = await $.process.run(gitArgv(args), { cwd: root, timeoutMs: 10_000 })
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `git ${args[0] ?? ''} 失敗（${result.exitCode}）`)
   return result.stdout
 }
@@ -117,8 +121,11 @@ const gitRun = async ($: EngineInterface, args: readonly string[]): Promise<stri
 const refreshGit = async ($: EngineInterface): Promise<void> => {
   if (!(await read($, isGitOpen))) return
   let next: GitView
+  let risk: string | null = null
   try {
-    const shadow = await shadowingGit($)
+    // 檢查與執行都固定在專案根目錄，確保檢查過的資料夾就是 git 執行時的資料夾
+    const root = slash(await $.session.root())
+    const shadow = await shadowingGit($, root)
     if (shadow !== null) {
       await update($, git, () => ({
         isRepo: true, status: null, staged: {}, unstaged: {}, commits: [], stashes: 0,
@@ -126,20 +133,20 @@ const refreshGit = async ($: EngineInterface): Promise<void> => {
       }))
       return
     }
-    const inside = await $.process.run(gitArgv(['rev-parse', '--is-inside-work-tree']), { timeoutMs: 10_000 })
+    const inside = await $.process.run(gitArgv(['rev-parse', '--is-inside-work-tree']), { cwd: root, timeoutMs: 10_000 })
     if (inside.exitCode !== 0 || inside.stdout.trim() !== 'true') {
       next = { isRepo: false, status: null, staged: {}, unstaged: {}, commits: [], stashes: 0, error: null }
-    } else if (await hasRepoFilters($)) {
-      next = { isRepo: true, status: null, staged: {}, unstaged: {}, commits: [], stashes: 0, error: FILTER_SKIPPED }
+    } else if ((risk = await repoFilterRisk($, root)) !== null) {
+      next = { isRepo: true, status: null, staged: {}, unstaged: {}, commits: [], stashes: 0, error: risk }
     } else {
-      const status = parseStatus(await gitRun($, ['status', '--porcelain=v2', '--branch', '-z', '--ignore-submodules=all']))
+      const status = parseStatus(await gitRun($, root, ['status', '--porcelain=v2', '--branch', '-z', '--ignore-submodules=all']))
       const diff = ['diff', '--numstat', '-z', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all']
-      const staged = parseNumstat(await gitRun($, [...diff, '--cached']))
-      const unstaged = parseNumstat(await gitRun($, diff))
+      const staged = parseNumstat(await gitRun($, root, [...diff, '--cached']))
+      const unstaged = parseNumstat(await gitRun($, root, diff))
       // 剛 init、還沒有任何 commit 時 git log 會失敗，視為沒有提交
-      const log = await $.process.run(gitArgv(['log', `-n${COMMIT_COUNT}`, `--format=${LOG_FORMAT}`]), { timeoutMs: 10_000 })
+      const log = await $.process.run(gitArgv(['log', `-n${COMMIT_COUNT}`, `--format=${LOG_FORMAT}`]), { cwd: root, timeoutMs: 10_000 })
       const commits = log.exitCode === 0 ? parseLog(log.stdout) : []
-      const stashes = (await gitRun($, ['stash', 'list'])).split('\n').filter(l => l.trim() !== '').length
+      const stashes = (await gitRun($, root, ['stash', 'list'])).split('\n').filter(l => l.trim() !== '').length
       next = { isRepo: true, status, staged, unstaged, commits, stashes, error: null }
     }
   } catch (err) {
