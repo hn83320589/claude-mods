@@ -1,10 +1,11 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, SessionMessage, Timer } from 'claude-code'
 
 import type { ContextBreakdown, ReplayCursor, Running, Task, Usage } from '../types'
 import { countPatch, groupEdits, isUntested, recordEdit } from './blast'
 import { ACCENT, barOf, compact, levelColor, limitName, resetIn } from './format'
 import { fit, pick, SECTION_CHROME, share, splitRows } from './layout'
+import { COMPACT_INSTRUCTIONS, COMPACT_THRESHOLD, NOTES_DIR, NOTES_GITIGNORE, notesFileName, notesMarkdown } from './notes'
 import { addStep, firstLine, resolveCursor, startTurn, windowAround } from './replay'
 import { duration, ratio, recordCache, recordTool, statusName, summarizeTools, visibleAgents } from './stats'
 import { applyTaskTool, runningLabel } from './tasks'
@@ -91,6 +92,13 @@ const onTick = async ($: EngineInterface): Promise<void> => {
   }
 }
 
+// 手動重新整理：讀取失敗或停在「讀取中」時用。開關可能被重置（例如 /clear 之後），一併設回並恢復計時更新。
+const refreshNow = async ($: EngineInterface): Promise<void> => {
+  await update($, isOpen, () => true)
+  await refresh($, true)
+  timer ??= $.clock.every(TICK_MS, () => void onTick($))
+}
+
 const open = async ($: EngineInterface): Promise<void> => {
   await update($, isOpen, () => true)
   await refresh($, true)
@@ -120,6 +128,53 @@ const scheduleHeal = async ($: EngineInterface): Promise<void> => {
         $.ui.log(`pane 資料補讀失敗：${err instanceof Error ? err.message : String(err)}`, { to: 'debug' })
       } finally {
         healing = false
+      }
+    })()
+  })
+}
+
+// ── Context 自動處理 ──────────────────────────────────────
+
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+const slashed = (path: string): string => path.replaceAll(String.fromCharCode(92), '/')
+
+// 預先壓縮進行中時不重複觸發（模組重新載入時歸零，最多多觸發一次，引擎會擋下重疊的壓縮）
+let compacting = false
+
+/** 把壓縮後的內容存到專案的 .claude/session-notes/，資料夾自帶 .gitignore 不會被提交。 */
+const saveNotes = async (
+  $: EngineInterface,
+  messages: readonly SessionMessage[],
+  meta: { trigger: string; percent: number | null },
+): Promise<string> => {
+  const dir = `${slashed(await $.session.root())}/${NOTES_DIR}`
+  const ignore = `${dir}/.gitignore`
+  if (!(await $.fs.exists(ignore))) await $.fs.write(ignore, NOTES_GITIGNORE)
+  const existing = (await $.fs.exists(dir)) ? (await $.fs.list(dir)).map(e => e.name) : []
+  const when = new Date(await $.clock.now())
+  const file = `${dir}/${notesFileName(when, existing)}`
+  await $.fs.write(file, notesMarkdown(messages, { when, ...meta }))
+  return file
+}
+
+/** 回合結束後 context 達到門檻就先壓縮：不等引擎在工具執行到一半時才自動壓縮。 */
+const compactIfNeeded = async ($: EngineInterface): Promise<void> => {
+  const percent = (await $.session.usage()).context.percent ?? null
+  if (percent === null || percent < COMPACT_THRESHOLD || compacting) return
+  compacting = true
+  // 回合進行中不能壓縮：排到這個事件處理完之後
+  $.clock.after(0, () => {
+    void (async () => {
+      try {
+        // 自己發起的壓縮不會經過自己的 session.compact hook，所以指示與存檔在這裡處理
+        const result = await $.session.compact({ instructions: COMPACT_INSTRUCTIONS })
+        if (result.skip !== undefined) return
+        const file = await saveNotes($, result.messages, { trigger: 'plugin', percent })
+        $.ui.toast(`Context 已達 ${percent}%，已先壓縮；摘要存在 ${file.split('/').slice(-3).join('/')}`)
+      } catch (err) {
+        $.ui.log(`預先壓縮失敗：${errorText(err)}`, { to: 'debug' })
+      } finally {
+        compacting = false
       }
     })()
   })
@@ -208,9 +263,30 @@ export const register: Register = on => {
       const tokens = (await $.session.usage()).context.tokens
       if (tokens !== undefined) await update($, history, list => [...list, tokens].slice(-HISTORY_SIZE))
       await update($, cache, c => recordCache(c, e.usage))
+      try {
+        await compactIfNeeded($)
+      } catch (err) {
+        $.ui.log(`context 用量檢查失敗：${errorText(err)}`, { to: 'debug' })
+      }
     }
     await refresh($, true)
     return ran
+  })
+
+  // 所有壓縮（引擎自動、/compact、預先計算）都加上要保留的重點；完成的壓縮把結果存到專案
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    const instructions = [e.instructions, COMPACT_INSTRUCTIONS].filter(text => text !== undefined && text !== '').join('\n\n')
+    const result = await next({ ...e, instructions })
+    // precompute 是提前算好、之後才套用的摘要，套用時（auto）才存
+    if (result.skip === undefined && e.trigger !== 'precompute') {
+      try {
+        await saveNotes($, result.messages, { trigger: e.trigger, percent: null })
+      } catch (err) {
+        $.ui.log(`工作階段摘要存檔失敗：${errorText(err)}`, { to: 'debug' })
+      }
+    }
+    return result
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -462,7 +538,8 @@ export const register: Register = on => {
             height: usageRows,
             right: (
               <Box columnGap={1}>
-                <Text dimColor wrap="truncate-end">{u === null ? '' : clip(u.model, Math.max(8, inner - 22))}</Text>
+                <Text dimColor wrap="truncate-end">{u === null ? '' : clip(u.model, Math.max(8, inner - 32))}</Text>
+                <Button key="usage-refresh" dimColor hotkey="r" onPress={() => refreshNow($)}>重新整理</Button>
                 <Button key="close" dimColor onPress={() => $.ui.close({ id: PANE })}>關閉</Button>
               </Box>
             ),

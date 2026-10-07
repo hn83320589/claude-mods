@@ -4,8 +4,10 @@
 
 | Plugin | 內容 |
 | --- | --- |
-| `session-stats` | 右側 pane「工作階段狀態」：用量與預報（context、rate limit、compact 預估）、任務與執行紀錄（可回放）、上下文與改動範圍。指令 `/session-stats` 開關 |
+| `session-stats` | 右側 pane「工作階段狀態」：用量與預報（context、rate limit、compact 預估）、任務與執行紀錄（可回放）、上下文與改動範圍。指令 `/session-stats` 開關；用量區塊有「重新整理」（快捷鍵 r） |
 | `project-activity` | 「專案活動」pane（專案類型、關鍵檔案、熱門檔案、最近活動）與「Git 狀態」pane，測試結果 status line、回合摘要 band。指令 `/project-activity`、`/git-status` |
+
+兩個 plugin 分開，是因為引擎規定用到 `$`（引擎介面）的程式必須寫在同一個檔案；合併會變成一個上千行的檔案。安裝時兩個都裝即可。
 
 ## 安裝（新的電腦）
 
@@ -46,6 +48,12 @@ claude plugin test ./session-stats
 claude plugin validate ./project-activity
 claude plugin test ./project-activity
 ```
+
+## Context 自動處理（session-stats）
+
+- **門檻 80%**：每個回合結束時檢查 context 用量，達到 80% 就在回合之間先壓縮，不等引擎在工具執行到一半時才自動壓縮；畫面會顯示提示。
+- **保留重點**：每次壓縮（自動、`/compact`、預先壓縮）都會要求摘要保留目前任務與進度、已做的決定與原因、改過的檔案、使用者的偏好與規則、未解決的問題。
+- **摘要存檔**：壓縮後的內容存到專案的 `.claude/session-notes/YYYY-MM-DD-HHmm.md`。資料夾內有自己的 `.gitignore`（忽略全部），不會被提交，也不必修改專案的 `.gitignore`。
 
 ## 專案設定（選用）
 

@@ -1,7 +1,9 @@
 {
   "name": "session-stats",
-  "version": "0.2.1",
-  "description": "工作階段狀態 pane：用量與預報（context、rate limit、compact 預估）、任務與執行紀錄（回放）、上下文與改動範圍",
-  "author": { "name": "DADA" },
+  "version": "0.3.0",
+  "description": "工作階段狀態 pane：用量與預報（context、rate limit、compact 預估，可手動重新整理）、任務與執行紀錄（回放）、上下文與改動範圍；context 達 80% 時在回合之間先壓縮，壓縮摘要存到專案 .claude/session-notes/",
+  "author": {
+    "name": "DADA"
+  },
   "types": "./types/index.d.ts"
 }

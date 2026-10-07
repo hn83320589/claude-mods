@@ -44,9 +44,9 @@ const USAGE = {
 const TALL = { ...PANE, props: { ...PANE.props, scroll: { offset: 0, bodyRows: 60 } } } as const
 
 // withClock: false 時由測試自己用 mock.clock 控制時間
-const answerEngine = (on: any, { withClock = true, turns = (): number => 3 } = {}) => {
+const answerEngine = (on: any, { withClock = true, turns = (): number => 3, percent = (): number => 42 } = {}) => {
   let nextId = 0
-  on('session.usage', () => ({ value: USAGE }))
+  on('session.usage', () => ({ value: { ...USAGE, context: { ...USAGE.context, percent: percent() } } }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   if (withClock) {
     on('clock.now', () => ({ value: 0 }))
@@ -247,4 +247,82 @@ test('補讀之後計時更新恢復運作', async ($, on) => {
   await clock.advance(15_000)
   expect(await ui.find({ type: 'Text', text: /7 回合/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('按「重新整理」立即重新讀取用量', async ($, on) => {
+  answerEngine(on, { withClock: false })
+  mock.clock(on)
+
+  const ui = await $.ui.mount({ ...TALL, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /讀取中/ })).toBeDefined()
+  await ui.press({ key: 'usage-refresh' })
+
+  expect(await ui.find({ type: 'Text', text: /42%/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// ── context 自動處理 ──
+
+const answerFiles = (on: any, written: Record<string, string>) => {
+  on('fs.exists', (_$: unknown, e: any) => ({ value: String(e.path) in written }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.write', (_$: unknown, e: any) => {
+    written[String(e.path).split(String.fromCharCode(92)).join('/')] = e.text
+    return { value: undefined }
+  })
+}
+
+test('每次壓縮都加上要保留的重點，完成後把摘要存到專案（資料夾不提交）', async ($, on) => {
+  const written: Record<string, string> = {}
+  let instructions = ''
+  answerEngine(on)
+  answerFiles(on, written)
+  on('session.compact', (_$: unknown, e: any) => {
+    instructions = e.instructions ?? ''
+    return { messages: [{ role: 'user', text: '摘要：正在重構 workbench', toolUses: [] }] }
+  })
+
+  await $.session.compact({ trigger: 'manual', instructions: '注意 API 變更', messages: [{ role: 'user', text: '重構 workbench', toolUses: [] }] } as any)
+
+  expect(instructions).toContain('注意 API 變更')
+  expect(instructions).toContain('目前正在進行的任務')
+  const files = Object.keys(written)
+  expect(files.some(f => f.endsWith('.claude/session-notes/.gitignore'))).toBe(true)
+  const note = files.find(f => /session-notes[/].+[.]md$/.test(f))
+  expect(note === undefined ? '' : written[note]).toContain('摘要：正在重構 workbench')
+})
+
+test('回合結束時 context 達 80% 就先壓縮', async ($, on) => {
+  const written: Record<string, string> = {}
+  let compacted = 0
+  answerEngine(on, { withClock: false, percent: () => 85 })
+  answerFiles(on, written)
+  const clock = mock.clock(on)
+  on('session.compact', () => {
+    compacted += 1
+    return { messages: [{ role: 'user', text: '摘要', toolUses: [] }] }
+  })
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.turn.complete({ answer: '完成', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.settle()
+
+  expect(compacted).toBe(1)
+})
+
+test('context 未達 80% 時不壓縮', async ($, on) => {
+  let compacted = 0
+  answerEngine(on, { withClock: false, percent: () => 60 })
+  answerFiles(on, {})
+  const clock = mock.clock(on)
+  on('session.compact', () => {
+    compacted += 1
+    return { messages: [] }
+  })
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.turn.complete({ answer: '完成', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.settle()
+
+  expect(compacted).toBe(0)
 })

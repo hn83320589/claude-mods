@@ -8,7 +8,7 @@
     {
       "name": "session-stats",
       "source": "./session-stats",
-      "description": "工作階段狀態 pane：用量與預報、任務與執行紀錄、上下文與改動"
+      "description": "工作階段狀態 pane：用量與預報、任務與執行紀錄、上下文與改動；context 達 80% 自動先壓縮並存摘要"
     },
     {
       "name": "project-activity",

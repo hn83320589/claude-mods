@@ -155,6 +155,13 @@ const refreshGit = async ($: EngineInterface): Promise<void> => {
   await update($, git, () => next)
 }
 
+// 手動重新整理：pane 開著就代表要看。開關可能被重置（例如 /clear 之後），先設回來再讀取，
+// 否則 refreshGit 會把它當成「pane 關著」而直接略過（之前按了沒反應的原因）。
+const forceRefreshGit = async ($: EngineInterface): Promise<void> => {
+  await update($, isGitOpen, () => true)
+  await refreshGit($)
+}
+
 const openGit = async ($: EngineInterface): Promise<void> => {
   await update($, isGitOpen, () => true)
   await refreshGit($)
@@ -482,7 +489,7 @@ export const register: Register = on => {
 
     const controls = (
       <Box columnGap={1}>
-        <Button key="git-refresh" dimColor hotkey="r" onPress={() => refreshGit($)}>重新整理</Button>
+        <Button key="git-refresh" dimColor hotkey="r" onPress={() => forceRefreshGit($)}>重新整理</Button>
         <Button key="git-close" dimColor onPress={() => $.ui.close({ id: GIT_PANE })}>關閉</Button>
       </Box>
     )

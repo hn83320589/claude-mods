@@ -382,3 +382,16 @@ test('git 指令都在專案根目錄執行', async ($, on) => {
   expect(gitCwds.length).toBeGreaterThan(0)
   for (const cwd of gitCwds) expect(String(cwd).split(String.fromCharCode(92)).join('/')).toBe(ROOT)
 })
+
+// 之前按了沒反應：pane 開著但開關被重置（例如 /clear 後）時，重新整理直接被略過
+test('按「重新整理」一定會重新讀取 Git 狀態', async ($, on) => {
+  answerEngine(on, { ...LUCKYDRAW, git: REPO }, { withClock: false })
+  mock.clock(on, { now: NOW })
+
+  const ui = await $.ui.mount({ ...GIT, surface: 'terminal' })
+  await ui.press({ key: 'git-refresh' })
+
+  expect(gitCalls.some(argv => argv.includes('status'))).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /⎇ main/ })).toBeDefined()
+  await ui.unmount()
+})

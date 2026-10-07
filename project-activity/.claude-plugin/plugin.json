@@ -1,7 +1,9 @@
 {
   "name": "project-activity",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "任何專案通用：專案活動 pane（專案狀態、熱門檔案、最近活動）與 Git 狀態 pane，加上測試結果 status line 與回合摘要 band",
-  "author": { "name": "DADA" },
+  "author": {
+    "name": "DADA"
+  },
   "types": "./types/index.d.ts"
 }
