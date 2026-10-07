@@ -263,8 +263,16 @@ test('按「重新整理」立即重新讀取用量', async ($, on) => {
 
 // ── context 自動處理 ──
 
+// fs.stat 對不存在的路徑以 ENOENT 拒絕
+const missing = (path: string) => ({ deny: `ENOENT: no such file or directory, stat '${path}'` })
+
 const answerFiles = (on: any, written: Record<string, string>) => {
-  on('fs.stat', (_$: unknown, e: any) => ({ value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: String(e.path) } }))
+  on('fs.stat', (_$: unknown, e: any) => {
+    const path = String(e.path)
+    if (!/[.](md|gitignore)$/.test(path)) return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: path } }
+    if (!(path in written)) return missing(path)
+    return { value: { kind: 'file', size: 0, mtimeMs: 0, isLink: false, realPath: path } }
+  })
   on('fs.exists', (_$: unknown, e: any) => ({ value: String(e.path) in written }))
   on('fs.list', () => ({ value: [] }))
   on('fs.write', (_$: unknown, e: any) => {
@@ -336,6 +344,50 @@ test('.claude 是指向專案外的符號連結時不存摘要', async ($, on) =
   on('fs.stat', (_$: unknown, e: any) => ({
     value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: String(e.path).endsWith('.claude'), realPath: String(e.path).endsWith('.claude') ? 'C:/Users/me/AppData/Roaming/Microsoft/Windows/Start Menu' : String(e.path) },
   }))
+  on('fs.write', (_$: unknown, e: any) => {
+    written[String(e.path)] = e.text
+    return { value: undefined }
+  })
+  on('session.compact', () => ({ messages: [{ role: 'user', text: '摘要', toolUses: [] }] }))
+
+  await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: '對話', toolUses: [] }] } as any)
+
+  expect(Object.keys(written)).toEqual([])
+})
+
+test('.gitignore 是指向專案外、目標不存在的符號連結時不存摘要', async ($, on) => {
+  const written: Record<string, string> = {}
+  answerEngine(on)
+  on('fs.exists', () => ({ value: false }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.stat', (_$: unknown, e: any) => {
+    const path = String(e.path)
+    if (path.endsWith('.gitignore')) return { value: { kind: 'other', size: 0, mtimeMs: 0, isLink: true } }
+    if (path.endsWith('.md')) return missing(path)
+    return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: path } }
+  })
+  on('fs.write', (_$: unknown, e: any) => {
+    written[String(e.path)] = e.text
+    return { value: undefined }
+  })
+  on('session.compact', () => ({ messages: [{ role: 'user', text: '摘要', toolUses: [] }] }))
+
+  await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: '對話', toolUses: [] }] } as any)
+
+  expect(Object.keys(written)).toEqual([])
+})
+
+test('無法確認 .claude 的狀態（不是不存在）時不存摘要', async ($, on) => {
+  const written: Record<string, string> = {}
+  answerEngine(on)
+  on('fs.exists', () => ({ value: false }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.stat', (_$: unknown, e: any) => {
+    const path = String(e.path)
+    if (path.endsWith('.claude')) return { deny: `EACCES: permission denied, stat '${path}'` }
+    if (/[.](md|gitignore)$/.test(path) || path.endsWith('session-notes')) return missing(path)
+    return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: path } }
+  })
   on('fs.write', (_$: unknown, e: any) => {
     written[String(e.path)] = e.text
     return { value: undefined }

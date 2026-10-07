@@ -55,7 +55,7 @@ claude plugin test ./project-activity
 - **保留重點**：每次壓縮（自動、`/compact`、預先壓縮）都會要求摘要保留目前任務與進度、已做的決定與原因、改過的檔案、使用者的偏好與規則、未解決的問題。
 - **摘要存檔**：壓縮產生的摘要存到專案的 `.claude/session-notes/YYYY-MM-DD-HHmm.md`。資料夾內有自己的 `.gitignore`（忽略全部），不會被提交，也不必修改專案的 `.gitignore`。
   - 只存摘要，不存原樣保留的訊息；常見的密鑰與密碼（API key、GitHub／AWS／Slack token、JWT、私鑰、`password=` 等）存檔前會遮蔽
-  - `.claude` 或 `session-notes` 是符號連結、或實際位置不在專案內時不存檔，避免寫到專案外
+  - `.claude`、`session-notes` 或要寫入的檔案（含 `.gitignore`）是符號連結、實際位置不在專案內，或狀態無法確認（例如權限不足）時都不存檔，避免寫到專案外
 
 ## 專案設定（選用）
 

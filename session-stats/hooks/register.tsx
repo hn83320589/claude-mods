@@ -141,24 +141,37 @@ const slashed = (path: string): string => path.replaceAll(String.fromCharCode(92
 // 預先壓縮進行中時不重複觸發（模組重新載入時歸零，最多多觸發一次，引擎會擋下重疊的壓縮）
 let compacting = false
 
+/** fs.stat 的失敗只有「不存在」可以放行；權限不足等其他錯誤一律當作不安全。 */
+const isMissing = (err: unknown): boolean => {
+  const code = typeof err === 'object' && err !== null && 'code' in err ? String(err.code) : ''
+  return code === 'ENOENT' || errorText(err).includes('ENOENT')
+}
+
 /**
- * 確認摘要資料夾在專案之內：別人的 repo 可以把 .claude 或 session-notes 做成符號連結，
- * 指向專案外（例如開機自動執行的資料夾），讓存檔寫到那裡。路徑上已存在的每一層都必須是
- * 一般資料夾、不是連結，且實際位置在專案根目錄之內；不符合就不存檔。
+ * 確認要寫的路徑在專案之內：別人的 repo 可以把 .claude、session-notes 或其中的檔案做成符號連結
+ * （目標不存在也一樣會被寫入），指向專案外（例如開機自動執行的資料夾）。每一層已存在的路徑都必須
+ * 是指定種類、不是連結，且實際位置在專案根目錄之內；不存在的放行，由 fs.write 在專案內建立。
+ * 回傳路徑是否已存在；不安全或無法確認時丟出錯誤，不存檔。
  */
-const assertNotesDirSafe = async ($: EngineInterface, root: string): Promise<void> => {
-  const rootReal = (await $.fs.stat(root, { resolve: true })).realPath ?? root
-  for (const path of [`${root}/.claude`, `${root}/${NOTES_DIR}`]) {
-    let stat: Awaited<ReturnType<EngineInterface['fs']['stat']>>
-    try {
-      stat = await $.fs.stat(path, { resolve: true })
-    } catch {
-      return // 還不存在：之後由 fs.write 在專案內建立
-    }
-    if (stat.isLink || stat.kind !== 'dir' || stat.realPath === undefined || !isInside(stat.realPath, rootReal)) {
-      throw new Error(`${path} 不是專案內的一般資料夾（可能是符號連結），略過存檔`)
-    }
+const assertInside = async ($: EngineInterface, path: string, kind: 'dir' | 'file', rootReal: string): Promise<boolean> => {
+  let stat: Awaited<ReturnType<EngineInterface['fs']['stat']>>
+  try {
+    stat = await $.fs.stat(path, { resolve: true })
+  } catch (err) {
+    if (isMissing(err)) return false
+    throw new Error(`無法確認 ${path} 的狀態（${errorText(err)}），略過存檔`)
   }
+  if (stat.isLink || stat.kind !== kind || stat.realPath === undefined || !isInside(stat.realPath, rootReal)) {
+    throw new Error(`${path} 不是專案內的一般${kind === 'dir' ? '資料夾' : '檔案'}（可能是符號連結），略過存檔`)
+  }
+  return true
+}
+
+/** 專案根目錄的實際位置；解析不出來就不存檔。 */
+const realRoot = async ($: EngineInterface, root: string): Promise<string> => {
+  const real = (await $.fs.stat(root, { resolve: true })).realPath
+  if (real === undefined) throw new Error(`無法解析專案根目錄 ${root} 的實際位置，略過存檔`)
+  return real
 }
 
 /** 把壓縮產生的摘要存到專案的 .claude/session-notes/，資料夾自帶 .gitignore 不會被提交。 */
@@ -168,13 +181,16 @@ const saveNotes = async (
   meta: { trigger: string; percent: number | null },
 ): Promise<string> => {
   const root = slashed(await $.session.root())
-  await assertNotesDirSafe($, root)
+  const rootReal = await realRoot($, root)
   const dir = `${root}/${NOTES_DIR}`
+  const dirExists = (await assertInside($, `${root}/.claude`, 'dir', rootReal)) && (await assertInside($, dir, 'dir', rootReal))
   const ignore = `${dir}/.gitignore`
-  if (!(await $.fs.exists(ignore))) await $.fs.write(ignore, NOTES_GITIGNORE)
-  const existing = (await $.fs.exists(dir)) ? (await $.fs.list(dir)).map(e => e.name) : []
+  if (!(await assertInside($, ignore, 'file', rootReal))) await $.fs.write(ignore, NOTES_GITIGNORE)
+  const existing = dirExists ? (await $.fs.list(dir)).map(e => e.name) : []
   const when = new Date(await $.clock.now())
   const file = `${dir}/${notesFileName(when, existing)}`
+  // 檔名已避開清單裡的名稱；寫入前仍確認它不是連結
+  await assertInside($, file, 'file', rootReal)
   await $.fs.write(file, notesMarkdown(messages, { when, ...meta }))
   return file
 }
