@@ -264,6 +264,7 @@ test('按「重新整理」立即重新讀取用量', async ($, on) => {
 // ── context 自動處理 ──
 
 const answerFiles = (on: any, written: Record<string, string>) => {
+  on('fs.stat', (_$: unknown, e: any) => ({ value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: String(e.path) } }))
   on('fs.exists', (_$: unknown, e: any) => ({ value: String(e.path) in written }))
   on('fs.list', () => ({ value: [] }))
   on('fs.write', (_$: unknown, e: any) => {
@@ -325,4 +326,23 @@ test('context 未達 80% 時不壓縮', async ($, on) => {
   await clock.settle()
 
   expect(compacted).toBe(0)
+})
+
+test('.claude 是指向專案外的符號連結時不存摘要', async ($, on) => {
+  const written: Record<string, string> = {}
+  answerEngine(on)
+  on('fs.exists', () => ({ value: true }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.stat', (_$: unknown, e: any) => ({
+    value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: String(e.path).endsWith('.claude'), realPath: String(e.path).endsWith('.claude') ? 'C:/Users/me/AppData/Roaming/Microsoft/Windows/Start Menu' : String(e.path) },
+  }))
+  on('fs.write', (_$: unknown, e: any) => {
+    written[String(e.path)] = e.text
+    return { value: undefined }
+  })
+  on('session.compact', () => ({ messages: [{ role: 'user', text: '摘要', toolUses: [] }] }))
+
+  await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: '對話', toolUses: [] }] } as any)
+
+  expect(Object.keys(written)).toEqual([])
 })

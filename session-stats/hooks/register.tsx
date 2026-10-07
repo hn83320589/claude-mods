@@ -5,7 +5,7 @@ import type { ContextBreakdown, ReplayCursor, Running, Task, Usage } from '../ty
 import { countPatch, groupEdits, isUntested, recordEdit } from './blast'
 import { ACCENT, barOf, compact, levelColor, limitName, resetIn } from './format'
 import { fit, pick, SECTION_CHROME, share, splitRows } from './layout'
-import { COMPACT_INSTRUCTIONS, COMPACT_THRESHOLD, NOTES_DIR, NOTES_GITIGNORE, notesFileName, notesMarkdown } from './notes'
+import { COMPACT_INSTRUCTIONS, COMPACT_THRESHOLD, isInside, NOTES_DIR, NOTES_GITIGNORE, notesFileName, notesMarkdown } from './notes'
 import { addStep, firstLine, resolveCursor, startTurn, windowAround } from './replay'
 import { duration, ratio, recordCache, recordTool, statusName, summarizeTools, visibleAgents } from './stats'
 import { applyTaskTool, runningLabel } from './tasks'
@@ -141,13 +141,35 @@ const slashed = (path: string): string => path.replaceAll(String.fromCharCode(92
 // 預先壓縮進行中時不重複觸發（模組重新載入時歸零，最多多觸發一次，引擎會擋下重疊的壓縮）
 let compacting = false
 
-/** 把壓縮後的內容存到專案的 .claude/session-notes/，資料夾自帶 .gitignore 不會被提交。 */
+/**
+ * 確認摘要資料夾在專案之內：別人的 repo 可以把 .claude 或 session-notes 做成符號連結，
+ * 指向專案外（例如開機自動執行的資料夾），讓存檔寫到那裡。路徑上已存在的每一層都必須是
+ * 一般資料夾、不是連結，且實際位置在專案根目錄之內；不符合就不存檔。
+ */
+const assertNotesDirSafe = async ($: EngineInterface, root: string): Promise<void> => {
+  const rootReal = (await $.fs.stat(root, { resolve: true })).realPath ?? root
+  for (const path of [`${root}/.claude`, `${root}/${NOTES_DIR}`]) {
+    let stat: Awaited<ReturnType<EngineInterface['fs']['stat']>>
+    try {
+      stat = await $.fs.stat(path, { resolve: true })
+    } catch {
+      return // 還不存在：之後由 fs.write 在專案內建立
+    }
+    if (stat.isLink || stat.kind !== 'dir' || stat.realPath === undefined || !isInside(stat.realPath, rootReal)) {
+      throw new Error(`${path} 不是專案內的一般資料夾（可能是符號連結），略過存檔`)
+    }
+  }
+}
+
+/** 把壓縮產生的摘要存到專案的 .claude/session-notes/，資料夾自帶 .gitignore 不會被提交。 */
 const saveNotes = async (
   $: EngineInterface,
   messages: readonly SessionMessage[],
   meta: { trigger: string; percent: number | null },
 ): Promise<string> => {
-  const dir = `${slashed(await $.session.root())}/${NOTES_DIR}`
+  const root = slashed(await $.session.root())
+  await assertNotesDirSafe($, root)
+  const dir = `${root}/${NOTES_DIR}`
   const ignore = `${dir}/.gitignore`
   if (!(await $.fs.exists(ignore))) await $.fs.write(ignore, NOTES_GITIGNORE)
   const existing = (await $.fs.exists(dir)) ? (await $.fs.list(dir)).map(e => e.name) : []
@@ -276,7 +298,7 @@ export const register: Register = on => {
   // 所有壓縮（引擎自動、/compact、預先計算）都加上要保留的重點；完成的壓縮把結果存到專案
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
-    const instructions = [e.instructions, COMPACT_INSTRUCTIONS].filter(text => text !== undefined && text !== '').join('\n\n')
+    const instructions = [e.instructions, COMPACT_INSTRUCTIONS].filter(text => text !== undefined && text !== '').join(String.fromCharCode(10).repeat(2))
     const result = await next({ ...e, instructions })
     // precompute 是提前算好、之後才套用的摘要，套用時（auto）才存
     if (result.skip === undefined && e.trigger !== 'precompute') {
