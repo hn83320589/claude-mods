@@ -83,13 +83,28 @@ const SAFE_CONFIG = [
 const gitArgv = (args: readonly string[]): string[] => ['git', ...SAFE_CONFIG, ...args]
 
 // filter（clean／smudge／process）可能在 git status 時被執行，名稱由 repo 自訂、無法逐一關閉：
-// repo 自己的設定（含 include 的檔案）定義了 filter 時，就不自動執行 git。讀取設定本身不會執行任何程式。
+// repo 自己的設定（local 與 worktree 範圍，含 include 的檔案）定義了 filter 時，就不自動執行 git。
+// 使用者全域或系統設定的 filter（例如 git-lfs）是使用者自己裝的，不受影響。讀取設定本身不會執行任何程式。
 const hasRepoFilters = async ($: EngineInterface): Promise<boolean> => {
   const result = await $.process.run(
-    gitArgv(['config', '--local', '--includes', '--name-only', '--get-regexp', '^filter[.].*[.](clean|smudge|process)$']),
+    gitArgv(['config', '--includes', '--show-scope', '--name-only', '--get-regexp', '^filter[.].*[.](clean|smudge|process)$']),
     { timeoutMs: 10_000 },
   )
-  return result.exitCode === 0 && result.stdout.trim() !== ''
+  if (result.exitCode !== 0) return false
+  return result.stdout
+    .split(String.fromCharCode(10))
+    .map(line => line.split(String.fromCharCode(9))[0]?.trim())
+    .some(scope => scope === 'local' || scope === 'worktree')
+}
+
+// Windows 執行 git 時會先找目前資料夾（專案根目錄）裡的 git.exe、git.cmd 等。
+// 根目錄有這類檔案時，執行的會是 repo 提供的程式，所以完全不執行 git。
+const SHADOWING_GIT = /^git[.](com|exe|bat|cmd|vbs|vbe|js|jse|wsf|wsh|msc|cpl|ps1)$/i
+
+const shadowingGit = async ($: EngineInterface): Promise<string | null> => {
+  const root = slash(await $.session.root())
+  const entry = (await $.fs.list(root)).find(e => SHADOWING_GIT.test(e.name))
+  return entry ? clean(entry.name) : null
 }
 
 const gitRun = async ($: EngineInterface, args: readonly string[]): Promise<string> => {
@@ -103,6 +118,14 @@ const refreshGit = async ($: EngineInterface): Promise<void> => {
   if (!(await read($, isGitOpen))) return
   let next: GitView
   try {
+    const shadow = await shadowingGit($)
+    if (shadow !== null) {
+      await update($, git, () => ({
+        isRepo: true, status: null, staged: {}, unstaged: {}, commits: [], stashes: 0,
+        error: `專案根目錄有 ${shadow}，Windows 執行 git 時會優先執行它，為了安全不自動執行 git 指令`,
+      }))
+      return
+    }
     const inside = await $.process.run(gitArgv(['rev-parse', '--is-inside-work-tree']), { timeoutMs: 10_000 })
     if (inside.exitCode !== 0 || inside.stdout.trim() !== 'true') {
       next = { isRepo: false, status: null, staged: {}, unstaged: {}, commits: [], stashes: 0, error: null }
@@ -120,7 +143,7 @@ const refreshGit = async ($: EngineInterface): Promise<void> => {
       next = { isRepo: true, status, staged, unstaged, commits, stashes, error: null }
     }
   } catch (err) {
-    next = { isRepo: true, status: null, staged: {}, unstaged: {}, commits: [], stashes: 0, error: message(err) }
+    next = { isRepo: true, status: null, staged: {}, unstaged: {}, commits: [], stashes: 0, error: `git 指令失敗：${message(err)}` }
   }
   await update($, git, () => next)
 }
@@ -464,7 +487,7 @@ export const register: Register = on => {
           ? [text(kit, '讀取中…', { dim: true })]
           : !view.isRepo
             ? [text(kit, '這個資料夾不是 git repository'), text(kit, '執行 git init 開始版本控制後，這裡會顯示分支與變更', { dim: true })]
-            : [text(kit, `git 指令失敗：${view.error ?? '未知原因'}`, { color: 'error' })]
+            : [text(kit, view.error ?? 'git 指令失敗：未知原因', { color: 'error' })]
       return (
         <Box flexDirection="column">
           {section(kit, { color: GIT_COLOR.branch, title: '◆ Git 狀態', height: Math.min(bodyRows, rows.length + SECTION_CHROME), right: controls }, rows)}

@@ -332,11 +332,29 @@ test('git 指令一律以命令列設定關閉 repo 設定可能執行的外部�
 })
 
 test('repo 自訂了 filter 時不執行 git status，並說明原因', async ($, on) => {
-  answerEngine(on, { ...LUCKYDRAW, git: { ...REPO!, filters: 'filter.evil.clean' } })
+  answerEngine(on, { ...LUCKYDRAW, git: { ...REPO!, filters: `worktree${TAB}filter.evil.clean` } })
   await $.command.run({ command: 'git-status', args: '' })
 
   expect(gitCalls.some(argv => argv.includes('status'))).toBe(false)
   const ui = await $.ui.mount({ ...GIT, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /filter/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('使用者全域設定的 filter（例如 git-lfs）不影響 Git pane', async ($, on) => {
+  answerEngine(on, { ...LUCKYDRAW, git: { ...REPO!, filters: `global${TAB}filter.lfs.clean` } })
+  await $.command.run({ command: 'git-status', args: '' })
+
+  expect(gitCalls.some(argv => argv.includes('status'))).toBe(true)
+})
+
+test('專案根目錄有 git 執行檔（Windows 會優先執行）時，完全不執行 git', async ($, on) => {
+  const files = { ...LUCKYDRAW.files, 'git.cmd': { kind: 'file' as const } }
+  answerEngine(on, { files, git: REPO })
+  await $.command.run({ command: 'git-status', args: '' })
+
+  expect(gitCalls.length).toBe(0)
+  const ui = await $.ui.mount({ ...GIT, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /git[.]cmd/ })).toBeDefined()
   await ui.unmount()
 })
