@@ -48,3 +48,10 @@ test('解析 log', async () => {
     { hash: 'abc1234', subject: 'init', author: 'me', time: 1780000000000 },
   ])
 })
+
+test('移除 commit 訊息、作者、分支與路徑中的控制字元（終端機跳脫序列）', async () => {
+  const ESC = String.fromCharCode(27)
+  const log = parseLog(`abc1234${FIELD}${ESC}[2J清除畫面${FIELD}${ESC}]0;x${String.fromCharCode(7)}DADA${FIELD}0${RECORD}`)
+  const status = parseStatus([`# branch.head ma${ESC}[31min`, `? ${ESC}[1m筆記.txt`, ''].join(NUL))
+  expect([log[0]?.subject, log[0]?.author, status.branch, status.files[0]?.path]).toEqual(['[2J清除畫面', ']0;xDADA', 'ma[31min', '[1m筆記.txt'])
+})

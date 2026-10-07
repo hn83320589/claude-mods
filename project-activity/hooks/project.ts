@@ -1,4 +1,5 @@
 import type { CheckRow, CheckSpec, FileHeat } from '../types'
+import { clean } from './text'
 
 // 任何專案通用的「專案狀態」：專案類型、關鍵檔案，以及專案自己設定的檢查清單。
 // 專案特有的檢查寫在 <專案>/.claude/project-activity.json，mod 本身不寫死任何專案。
@@ -39,7 +40,7 @@ export const parseConfig = (text: string): CheckSpec[] => {
   return checks.map((c, i) => {
     const item = c as Partial<CheckSpec> | null
     if (typeof item?.path !== 'string' || item.path === '') throw new Error(`checks[${i}] 缺少 "path"`)
-    return { path: item.path, required: item.required === true, dir: item.dir === true, note: typeof item.note === 'string' ? item.note : null }
+    return { path: clean(item.path), required: item.required === true, dir: item.dir === true, note: typeof item.note === 'string' ? clean(item.note) : null }
   })
 }
 

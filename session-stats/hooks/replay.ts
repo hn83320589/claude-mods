@@ -1,10 +1,11 @@
 import type { ReplayStep, ReplayTurn } from '../types'
+import { clean } from './text'
 
 export const MAX_TURNS = 30
 export const MAX_STEPS = 100
 
 export const firstLine = (text: string): string =>
-  text.split(/\r?\n/).map(l => l.trim()).find(l => l !== '') ?? ''
+  clean(text.split(/\r?\n/).map(l => l.trim()).find(l => l !== '') ?? '')
 
 export const startTurn = (turns: ReplayTurn[], id: string, prompt: string): ReplayTurn[] =>
   [...turns, { id, prompt: firstLine(prompt).slice(0, 200), steps: [] }].slice(-MAX_TURNS)

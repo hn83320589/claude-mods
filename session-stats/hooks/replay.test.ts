@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addStep, resolveCursor, startTurn, windowAround } from './replay'
+import { addStep, firstLine, resolveCursor, startTurn, windowAround } from './replay'
 
 const step = (id: string) => ({ id, tool: 'Bash', label: id, ms: 10, ok: true, summary: '' })
 
@@ -24,4 +24,9 @@ test('選取的步驟保持在可見範圍內', async () => {
   expect(windowAround(3, 0, 5)).toEqual({ start: 0, end: 3 })
   expect(windowAround(20, 10, 5)).toEqual({ start: 8, end: 13 })
   expect(windowAround(20, 19, 5)).toEqual({ start: 15, end: 20 })
+})
+
+test('摘要移除工具輸出中的控制字元（終端機跳脫序列）', async () => {
+  const ESC = String.fromCharCode(27)
+  expect(firstLine(`${ESC}[2J${ESC}[31m紅字`)).toBe('[2J[31m紅字')
 })

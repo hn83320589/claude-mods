@@ -32,3 +32,12 @@ export const clip = (text: string, width: number): string => {
   }
   return `${out}…`
 }
+
+// 移除控制字元（C0、DEL、C1，含 ESC）。commit 訊息、檔名、工具輸出都可能藏終端機跳脫序列，
+// 顯示前一律清掉，避免被當成指令改寫畫面或標題。字元以 fromCharCode 組成（mod 載入器處理反斜線有問題）。
+const CONTROL = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}-${String.fromCharCode(159)}]`,
+  'g',
+)
+
+export const clean = (text: string): string => text.replace(CONTROL, '')

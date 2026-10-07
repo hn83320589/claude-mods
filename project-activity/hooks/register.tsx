@@ -7,7 +7,7 @@ import { fit, SECTION_CHROME, share, splitRows } from './layout'
 import { formatStatus, isTestCommand, parseTestSummary } from './parse'
 import { ago, CONFIG_PATH, describeCheck, detectTypes, hottest, keyFiles, parseConfig, recordHeat } from './project'
 import type { Found } from './project'
-import { clip } from './text'
+import { clean, clip } from './text'
 import { barOf, diff, line, more, rule, section, text } from './ui'
 
 const PANE = 'project-activity'
@@ -18,6 +18,7 @@ const COLOR = { project: 'success', heat: 'claude', activity: 'suggestion' } as 
 const GIT_COLOR = { branch: 'claude', changes: 'warning', commits: 'success' } as const
 const LETTER_COLOR: Record<string, string> = { M: 'warning', A: 'success', D: 'error', R: 'suggestion', C: 'suggestion', U: 'error' }
 const COMMIT_COUNT = 30
+const FILTER_SKIPPED = '這個 repository 的設定定義了 filter，為了安全不自動執行 git 指令'
 
 const lastTest = atom({ plugin: 'project-activity', key: 'lastTest' } as const, null)
 const lastTestAt = atom({ plugin: 'project-activity', key: 'lastTestAt' } as const, null)
@@ -34,7 +35,7 @@ const EMPTY_TURN: Turn = { seconds: null, tools: 0, edits: 0 }
 
 const slash = (path: string): string => path.replaceAll(String.fromCharCode(92), '/')
 const shortPath = (path: string): string => slash(path).split('/').slice(-2).join('/')
-const fileName = (path: string): string => slash(path).split('/').pop() ?? path
+const fileName = (path: string): string => clean(slash(path).split('/').pop() ?? path)
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 // ── 專案狀態 ──────────────────────────────────────────────
@@ -69,8 +70,30 @@ const refreshProject = async ($: EngineInterface): Promise<void> => {
 
 // ── Git 狀態 ──────────────────────────────────────────────
 
+// 開啟的資料夾可能是別人的 repo：.git/config 能設定 fsmonitor、外部 diff、textconv、簽章驗證程式，
+// 讓 git status／diff／log 順便執行任意程式。以命令列設定（優先權高於 repo 設定）關閉這些功能，
+// diff 另加 --no-ext-diff、--no-textconv，並忽略 submodule（會讀取 submodule 自己的設定）。
+const SAFE_CONFIG = [
+  '-c', 'core.fsmonitor=false',
+  '-c', 'core.untrackedCache=false',
+  '-c', 'diff.external=',
+  '-c', 'log.showSignature=false',
+  '-c', 'status.submoduleSummary=false',
+]
+const gitArgv = (args: readonly string[]): string[] => ['git', ...SAFE_CONFIG, ...args]
+
+// filter（clean／smudge／process）可能在 git status 時被執行，名稱由 repo 自訂、無法逐一關閉：
+// repo 自己的設定（含 include 的檔案）定義了 filter 時，就不自動執行 git。讀取設定本身不會執行任何程式。
+const hasRepoFilters = async ($: EngineInterface): Promise<boolean> => {
+  const result = await $.process.run(
+    gitArgv(['config', '--local', '--includes', '--name-only', '--get-regexp', '^filter[.].*[.](clean|smudge|process)$']),
+    { timeoutMs: 10_000 },
+  )
+  return result.exitCode === 0 && result.stdout.trim() !== ''
+}
+
 const gitRun = async ($: EngineInterface, args: readonly string[]): Promise<string> => {
-  const result = await $.process.run(['git', ...args], { timeoutMs: 10_000 })
+  const result = await $.process.run(gitArgv(args), { timeoutMs: 10_000 })
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `git ${args[0] ?? ''} 失敗（${result.exitCode}）`)
   return result.stdout
 }
@@ -80,15 +103,18 @@ const refreshGit = async ($: EngineInterface): Promise<void> => {
   if (!(await read($, isGitOpen))) return
   let next: GitView
   try {
-    const inside = await $.process.run(['git', 'rev-parse', '--is-inside-work-tree'], { timeoutMs: 10_000 })
+    const inside = await $.process.run(gitArgv(['rev-parse', '--is-inside-work-tree']), { timeoutMs: 10_000 })
     if (inside.exitCode !== 0 || inside.stdout.trim() !== 'true') {
       next = { isRepo: false, status: null, staged: {}, unstaged: {}, commits: [], stashes: 0, error: null }
+    } else if (await hasRepoFilters($)) {
+      next = { isRepo: true, status: null, staged: {}, unstaged: {}, commits: [], stashes: 0, error: FILTER_SKIPPED }
     } else {
-      const status = parseStatus(await gitRun($, ['status', '--porcelain=v2', '--branch', '-z']))
-      const staged = parseNumstat(await gitRun($, ['diff', '--cached', '--numstat', '-z']))
-      const unstaged = parseNumstat(await gitRun($, ['diff', '--numstat', '-z']))
+      const status = parseStatus(await gitRun($, ['status', '--porcelain=v2', '--branch', '-z', '--ignore-submodules=all']))
+      const diff = ['diff', '--numstat', '-z', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all']
+      const staged = parseNumstat(await gitRun($, [...diff, '--cached']))
+      const unstaged = parseNumstat(await gitRun($, diff))
       // 剛 init、還沒有任何 commit 時 git log 會失敗，視為沒有提交
-      const log = await $.process.run(['git', 'log', `-n${COMMIT_COUNT}`, `--format=${LOG_FORMAT}`], { timeoutMs: 10_000 })
+      const log = await $.process.run(gitArgv(['log', `-n${COMMIT_COUNT}`, `--format=${LOG_FORMAT}`]), { timeoutMs: 10_000 })
       const commits = log.exitCode === 0 ? parseLog(log.stdout) : []
       const stashes = (await gitRun($, ['stash', 'list'])).split('\n').filter(l => l.trim() !== '').length
       next = { isRepo: true, status, staged, unstaged, commits, stashes, error: null }
@@ -175,7 +201,7 @@ export const register: Register = on => {
     const command = e.tool === 'Bash' || e.tool === 'PowerShell' ? e.command : undefined
     const file = e.tool === 'Edit' || e.tool === 'Write' ? e.file_path : undefined
     const readFile = e.tool === 'Read' ? e.file_path : undefined
-    const label = command?.slice(0, 60) ?? (file !== undefined ? shortPath(file) : readFile !== undefined ? shortPath(readFile) : '')
+    const label = clean(command?.slice(0, 60) ?? (file !== undefined ? shortPath(file) : readFile !== undefined ? shortPath(readFile) : ''))
     const call: ToolCall = { id: e.tool_use_id, tool: e.tool, label, isDone: false, isError: false }
     await update($, calls, list => [...list, call].slice(-200))
 

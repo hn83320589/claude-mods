@@ -22,7 +22,7 @@ type Fake = {
   // 相對於 ROOT 的路徑 → 檔案或資料夾
   files: Record<string, { kind: 'file' | 'dir'; size?: number; mtimeMs?: number; text?: string }>
   // null 代表不是 git repo
-  git: null | { status: string; staged: string; unstaged: string; log: string; stash: string }
+  git: null | { status: string; staged: string; unstaged: string; log: string; stash: string; filters?: string }
 }
 
 const LUCKYDRAW: Fake = {
@@ -77,7 +77,10 @@ const rel = (path: unknown): string => {
 }
 
 // withClock: false 時由測試自己用 mock.clock 控制時間
+let gitCalls: string[][] = []
+
 const answerEngine = (on: any, fake: Fake, { withClock = true } = {}) => {
+  gitCalls = []
   const children = (dir: string) =>
     Object.entries(fake.files)
       .filter(([p]) => (dir === '' ? !p.includes('/') : p.startsWith(`${dir}/`) && !p.slice(dir.length + 1).includes('/')))
@@ -92,9 +95,14 @@ const answerEngine = (on: any, fake: Fake, { withClock = true } = {}) => {
   })
   on('fs.read', (_$: unknown, e: any) => ({ value: fake.files[rel(e.path)]?.text ?? '' }))
   on('process.run', (_$: unknown, e: any) => {
-    const args: string[] = [...e.argv].slice(1)
+    const argv: string[] = [...e.argv]
+    gitCalls.push(argv)
+    // 略過安全設定的 -c key=value，取出真正的子指令
+    const args = argv.slice(1)
+    while (args[0] === '-c') args.splice(0, 2)
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '' } })
     if (fake.git === null) return { value: { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } }
+    if (args[0] === 'config') return fake.git.filters ? ok(fake.git.filters) : { value: { exitCode: 1, stdout: '', stderr: '' } }
     if (args[0] === 'rev-parse') return ok('true')
     if (args[0] === 'status') return ok(fake.git.status)
     if (args[0] === 'diff') return ok(args.includes('--cached') ? fake.git.staged : fake.git.unstaged)
@@ -303,5 +311,32 @@ test('專案活動 pane 沒有資料時，繪製後會自己補讀', async ($, o
   expect(await ui.find({ type: 'Text', text: /讀取中/ })).toBeDefined()
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /^LuckyDraw$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('git 指令一律以命令列設定關閉 repo 設定可能執行的外部程式', async ($, on) => {
+  answerEngine(on, { ...LUCKYDRAW, git: REPO })
+  await $.command.run({ command: 'git-status', args: '' })
+
+  const reading = gitCalls.filter(argv => !argv.includes('config') && !argv.includes('rev-parse'))
+  expect(reading.length).toBeGreaterThan(0)
+  for (const argv of reading) {
+    expect(argv).toContain('core.fsmonitor=false')
+    expect(argv).toContain('log.showSignature=false')
+  }
+  const diffs = reading.filter(argv => argv.includes('diff'))
+  for (const argv of diffs) {
+    expect(argv).toContain('--no-ext-diff')
+    expect(argv).toContain('--no-textconv')
+  }
+})
+
+test('repo 自訂了 filter 時不執行 git status，並說明原因', async ($, on) => {
+  answerEngine(on, { ...LUCKYDRAW, git: { ...REPO!, filters: 'filter.evil.clean' } })
+  await $.command.run({ command: 'git-status', args: '' })
+
+  expect(gitCalls.some(argv => argv.includes('status'))).toBe(false)
+  const ui = await $.ui.mount({ ...GIT, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /filter/ })).toBeDefined()
   await ui.unmount()
 })
