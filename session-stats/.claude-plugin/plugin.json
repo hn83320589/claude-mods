@@ -1,0 +1,7 @@
+{
+  "name": "session-stats",
+  "version": "0.2.0",
+  "description": "工作階段狀態 pane：用量與預報（context、rate limit、compact 預估）、任務與執行紀錄（回放）、上下文與改動範圍",
+  "author": { "name": "DADA" },
+  "types": "./types/index.d.ts"
+}

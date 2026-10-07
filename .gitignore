@@ -1,0 +1,3 @@
+# 引擎依目前的 Claude Code 版本自動產生的型別，不提交
+*/.claude-plugin/types/
+node_modules/

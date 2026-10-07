@@ -1,0 +1,19 @@
+{
+  "name": "claude-mods",
+  "description": "DADA 自用的 Claude Code mod：工作階段狀態、專案活動與 Git 狀態 pane",
+  "owner": {
+    "name": "DADA"
+  },
+  "plugins": [
+    {
+      "name": "session-stats",
+      "source": "./session-stats",
+      "description": "工作階段狀態 pane：用量與預報、任務與執行紀錄、上下文與改動"
+    },
+    {
+      "name": "project-activity",
+      "source": "./project-activity",
+      "description": "專案活動與 Git 狀態 pane、測試結果 status line、回合摘要"
+    }
+  ]
+}
